@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        getUserData().role == 'admin' ||
+        (request.auth.token.email == "gkrismantara@gmail.com" && request.auth.token.email_verified == true)
+      );
+    }
+
+    function isAnalyst() {
+      return isAuthenticated() && (getUserData().role == 'analyst' || isAdmin());
+    }
+
+    function isWarehouseManager() {
+      return isAuthenticated() && (getUserData().role == 'warehouse_manager' || isAdmin());
+    }
+
+    // ===============================================================
+    // Validation Functions
+    // ===============================================================
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'role']) &&
+             data.uid is string &&
+             data.email is string &&
+             data.role in ['admin', 'analyst', 'warehouse_manager'];
+    }
+
+    function isValidSample(data) {
+      return data.keys().hasAll(['type', 'sampleName', 'status']) &&
+             data.type in ['udara', 'air', 'b3_tanah', 'mikrobiologi'] &&
+             data.status in ['pending', 'in-progress', 'completed'];
+    }
+
+    function isValidStock(data) {
+      return data.keys().hasAll(['name', 'quantity', 'unit', 'location']) &&
+             data.quantity is number &&
+             data.location in ['lab', 'warehouse'];
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role);
+      allow delete: if isAdmin();
+    }
+
+    match /samples/{sampleId} {
+      allow read: if isAuthenticated();
+      allow create: if isAnalyst() && isValidSample(request.resource.data);
+      allow update: if isAnalyst() && isValidSample(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /stocks/{stockId} {
+      allow read: if isAuthenticated();
+      allow create: if isWarehouseManager() && isValidStock(request.resource.data);
+      allow update: if isWarehouseManager() && isValidStock(request.resource.data);
+      allow delete: if isAdmin();
+    }
+  }
+}

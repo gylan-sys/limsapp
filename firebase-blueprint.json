@@ -1,0 +1,65 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role and permissions",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "analyst", "warehouse_manager"] },
+        "permissions": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "LabSample": {
+      "title": "Lab Sample",
+      "description": "Lab sample data for different lab types",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["udara", "air", "b3_tanah", "mikrobiologi"] },
+        "sampleName": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "in-progress", "completed"] },
+        "analystId": { "type": "string" },
+        "result": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["type", "sampleName", "status"]
+    },
+    "StockItem": {
+      "title": "Stock Item",
+      "description": "Stock item for lab or warehouse",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "quantity": { "type": "number" },
+        "unit": { "type": "string" },
+        "location": { "type": "string", "enum": ["lab", "warehouse"] },
+        "labType": { "type": "string", "enum": ["udara", "air", "b3_tanah", "mikrobiologi", "general"] },
+        "rejectionReason": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "quantity", "unit", "location"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/samples/{sampleId}": {
+      "schema": "LabSample",
+      "description": "Lab samples"
+    },
+    "/stocks/{stockId}": {
+      "schema": "StockItem",
+      "description": "Stock items"
+    }
+  }
+}

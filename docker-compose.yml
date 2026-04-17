@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  lims-app:
+    build: .
+    container_name: lims-lab-info
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - ./data:/app/data
+    restart: always

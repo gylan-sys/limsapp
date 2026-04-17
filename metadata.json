@@ -1,0 +1,8 @@
+{
+  "name": "limsapp",
+  "description": "Laboratory Information Management System specialized for environmental laboratories (Air, Water, Soil, Microbiology). Features dashboard, stock management, QR code tracking, and user access control.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": []
+}
