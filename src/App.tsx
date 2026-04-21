@@ -1,4 +1,4 @@
-import React, { Component, useState, useEffect, useRef, useCallback } from 'react';
+import React, { Component, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, Link, useLocation } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import { 
@@ -67,7 +67,11 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Info,
-  Zap
+  Zap,
+  Scan,
+  Briefcase,
+  MapPin,
+  ThermometerSnowflake
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import QRCode from 'qrcode';
@@ -77,10 +81,13 @@ import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User,
 import { initializeApp, deleteApp, getApps } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import firebaseConfig from '../firebase-applet-config.json';
-import { doc, getDoc, setDoc, collection, onSnapshot, query, where, addDoc, updateDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, onSnapshot, query, where, addDoc, updateDoc, deleteDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from './lib/utils';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, Legend } from 'recharts';
+import SamplingDashboard from './components/SamplingDashboard';
+import LabLoginDashboard from './components/LabLoginDashboard';
+import SamplingAdminDashboard from './components/SamplingAdminDashboard';
 
 // --- Types ---
 enum OperationType {
@@ -151,7 +158,7 @@ const handleApiError = async (response: Response, context: string) => {
   throw new Error(errorMessage);
 };
 
-type UserRole = 'admin' | 'analyst' | 'warehouse_manager' | 'purchasing';
+type UserRole = 'admin' | 'analyst' | 'warehouse_manager' | 'purchasing' | 'sampling_admin' | 'sampling_officer' | 'login_team';
 
 interface UserProfile {
   uid: string;
@@ -234,6 +241,31 @@ interface ReagentTransfer {
   requestedBy: string;
   approvedBy?: string;
   createdAt: string;
+}
+
+interface SamplingJob {
+  id: string;
+  customerName: string;
+  status: 'PLANNED' | 'IN_FIELD' | 'SUBMITTED' | 'RECEIVED' | 'COMPLETED';
+  assignedTo: string; // UID
+  location: string;
+  stpsNumber: string;
+  plannedDate: string;
+  fieldData: any;
+  createdAt: any;
+}
+
+interface AppSample {
+  id: string;
+  jobId: string;
+  sampleName: string;
+  type: 'udara' | 'air' | 'b3_tanah' | 'mikrobiologi';
+  status: 'PENDING' | 'VERIFIED' | 'ANALYZING' | 'COMPLETED';
+  analystId?: string;
+  chillerLocation?: string;
+  labResults?: any;
+  verifiedAt?: any;
+  completedAt?: any;
 }
 
 interface AppNotification {
@@ -1054,10 +1086,13 @@ const DEFAULT_SETTINGS: AppSettingsData = {
     mikrobiologi: 'Lab Mikrobiologi'
   },
   rolePermissions: {
-    admin: ['dashboard', 'lab', 'stock_lab', 'stock_warehouse', 'master_data', 'purchasing', 'settings'],
+    admin: ['dashboard', 'lab', 'stock_lab', 'stock_warehouse', 'master_data', 'purchasing', 'settings', 'sampling_admin', 'sampling_officer', 'login_team', 'analyst_lab'],
     warehouse_manager: ['dashboard', 'stock_warehouse', 'master_data'],
     purchasing: ['dashboard', 'purchasing'],
-    analyst: ['dashboard', 'lab', 'stock_lab']
+    analyst: ['dashboard', 'lab', 'stock_lab', 'settings'],
+    sampling_admin: ['dashboard', 'sampling_admin', 'settings'],
+    sampling_officer: ['dashboard', 'sampling_officer', 'settings'],
+    login_team: ['dashboard', 'login_team', 'lab', 'settings']
   }
 };
 
@@ -1268,6 +1303,7 @@ const UserContext = React.createContext<{
   refreshSettings: () => Promise<void>;
   notifications: AppNotification[];
   markNotificationAsRead: (id: string) => void;
+  addNotification: (title: string, message: string, type: 'info' | 'warning' | 'error' | 'success') => void;
 }>({ 
   user: null, 
   profile: null, 
@@ -1276,7 +1312,8 @@ const UserContext = React.createContext<{
   settings: DEFAULT_SETTINGS,
   refreshSettings: async () => {},
   notifications: [],
-  markNotificationAsRead: () => {}
+  markNotificationAsRead: () => {},
+  addNotification: () => {}
 });
 
 const AuthGuard = ({ children }: { children: React.ReactNode }) => {
@@ -1309,7 +1346,11 @@ const AuthGuard = ({ children }: { children: React.ReactNode }) => {
   };
 
   useEffect(() => {
-    refreshSettings();
+    // Give the server a moment to start up if it's currently syncing DB
+    const timer = setTimeout(() => {
+      refreshSettings();
+    }, 1000);
+    return () => clearTimeout(timer);
   }, []);
 
   // Fetch notifications (mock logic for low stock)
@@ -1353,6 +1394,17 @@ const AuthGuard = ({ children }: { children: React.ReactNode }) => {
 
   const markNotificationAsRead = (id: string) => {
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+  };
+
+  const addNotification = (title: string, message: string, type: 'info' | 'warning' | 'error' | 'success' = 'info') => {
+    setNotifications(prev => [{
+      id: Math.random().toString(36).substr(2, 9),
+      title,
+      message,
+      type,
+      timestamp: new Date(),
+      read: false
+    }, ...prev]);
   };
 
   useEffect(() => {
@@ -1417,7 +1469,8 @@ const AuthGuard = ({ children }: { children: React.ReactNode }) => {
       settings, 
       refreshSettings,
       notifications,
-      markNotificationAsRead
+      markNotificationAsRead,
+      addNotification
     }}>
       {!user ? <Login /> : children}
     </UserContext.Provider>
@@ -1432,8 +1485,10 @@ const Login = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showReset, setShowReset] = useState(false);
+  const [isRegister, setIsRegister] = useState(false);
   const [resetEmail, setResetEmail] = useState('');
   const [resetSent, setResetSent] = useState(false);
+  const [regData, setRegData] = useState({ displayName: '', email: '', password: '' });
 
   const handleGoogleLogin = async () => {
     setLoading(true);
@@ -1455,7 +1510,48 @@ const Login = () => {
     try {
       await signInWithEmailAndPassword(auth, email, password);
     } catch (err: any) {
-      setError(err.message);
+      if (err.code === 'auth/invalid-credential') {
+        setError('Email atau Password salah.');
+      } else if (err.code === 'auth/user-not-found') {
+        setError('Akun tidak ditemukan.');
+      } else if (err.code === 'auth/wrong-password') {
+        setError('Password salah.');
+      } else {
+        setError('Gagal masuk: ' + (err.message || 'Error tidak diketahui'));
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleEmailRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!regData.displayName || !regData.email || !regData.password) {
+      setError('Mohon isi semua bidang.');
+      return;
+    }
+    if (regData.password.length < 6) {
+      setError('Password minimal 6 karakter.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const userCredential = await createUserWithEmailAndPassword(auth, regData.email, regData.password);
+      // Update profile with display name
+      const { updateProfile } = await import('firebase/auth');
+      await updateProfile(userCredential.user, {
+        displayName: regData.displayName
+      });
+      // Wait for Auth Sync useEffect to trigger automatically
+    } catch (err: any) {
+      if (err.code === 'auth/email-already-in-use') {
+        setError('Email sudah digunakan.');
+      } else if (err.code === 'auth/operation-not-allowed') {
+        setError('Pendaftaran Email/Password belum diaktifkan di Firebase Console.');
+      } else {
+        setError('Gagal mendaftar: ' + (err.message || 'Error tidak diketahui'));
+      }
     } finally {
       setLoading(false);
     }
@@ -1490,7 +1586,7 @@ const Login = () => {
             backgroundPosition: 'center'
           }}
         >
-          <div className="absolute inset-0 bg-gradient-to-br from-blue-900/80 via-slate-900/60 to-slate-900/90 backdrop-blur-[2px]"></div>
+          <div className="absolute inset-0 bg-gradient-to-br from-emerald-900/80 via-slate-900/60 to-slate-900/90 backdrop-blur-[2px]"></div>
         </motion.div>
 
         {/* Floating Elements */}
@@ -1510,7 +1606,7 @@ const Login = () => {
                 repeat: Infinity,
                 delay: i * 2
               }}
-              className="absolute rounded-full bg-blue-400/20 blur-3xl"
+              className="absolute rounded-full bg-emerald-400/20 blur-3xl"
               style={{
                 width: `${200 + Math.random() * 300}px`,
                 height: `${200 + Math.random() * 300}px`,
@@ -1530,7 +1626,7 @@ const Login = () => {
           >
             <div className={cn(
               "w-12 h-12 flex items-center justify-center",
-              settings.appLogo ? "bg-transparent" : "bg-blue-600 rounded-xl shadow-lg shadow-blue-500/20"
+              settings.appLogo ? "bg-transparent" : "bg-emerald-600 rounded-xl shadow-lg shadow-emerald-500/20"
             )}>
               {settings.appLogo ? (
                 <img src={settings.appLogo} alt="Logo" className="w-full h-full object-contain" />
@@ -1610,67 +1706,79 @@ const Login = () => {
           )}
 
           {!showReset ? (
-            <form onSubmit={handleEmailLogin} className="space-y-5">
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Email Address</label>
-                <div className="relative">
-                  <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
-                  <input 
-                    type="email" 
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="name@company.com"
-                    className="w-full pl-12 pr-4 py-3.5 rounded-2xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none transition-all bg-slate-50/50 focus:bg-white"
-                  />
-                </div>
-              </div>
+            <>
+              {!isRegister ? (
+                <form onSubmit={handleEmailLogin} className="space-y-5">
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-slate-700">Username / Email</label>
+                    <div className="relative">
+                      <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
+                      <input 
+                        type="email" 
+                        required
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="admin@lims.com"
+                        className="w-full pl-12 pr-4 py-3.5 rounded-2xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all bg-slate-50/50 focus:bg-white"
+                      />
+                    </div>
+                  </div>
 
-              <div className="space-y-2">
-                <div className="flex justify-between items-center">
-                  <label className="text-sm font-bold text-slate-700">Password</label>
-                  <button 
-                    type="button"
-                    onClick={() => setShowReset(true)}
-                    className="text-xs font-bold text-blue-600 hover:text-blue-700 transition-colors"
-                  >
-                    Forgot Password?
-                  </button>
-                </div>
-                <div className="relative">
-                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
-                  <input 
-                    type={showPassword ? "text" : "password"} 
-                    required
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="••••••••"
-                    className="w-full pl-12 pr-12 py-3.5 rounded-2xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none transition-all bg-slate-50/50 focus:bg-white"
-                  />
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <label className="text-sm font-bold text-slate-700">Password</label>
+                      <button 
+                        type="button"
+                        onClick={() => setShowReset(true)}
+                        className="text-xs font-bold text-emerald-600 hover:text-emerald-700 transition-colors"
+                      >
+                        Lupa Password?
+                      </button>
+                    </div>
+                    <div className="relative">
+                      <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
+                      <input 
+                        type={showPassword ? "text" : "password"} 
+                        required
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className="w-full pl-12 pr-12 py-3.5 rounded-2xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all bg-slate-50/50 focus:bg-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
+                      >
+                        {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+                      </button>
+                    </div>
+                  </div>
+
                   <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
+                    type="submit"
+                    disabled={loading}
+                    className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold text-lg hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50 flex items-center justify-center gap-2"
                   >
-                    {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+                    {loading ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : 'Masuk ke Sistem'}
                   </button>
-                </div>
-              </div>
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full bg-blue-600 text-white py-4 rounded-2xl font-bold text-lg hover:bg-blue-700 transition-all shadow-lg shadow-blue-500/20 disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                {loading ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : 'Sign In'}
-              </button>
+                  <div className="text-center pt-2">
+                    <button 
+                      type="button"
+                      onClick={() => setIsRegister(true)}
+                      className="text-sm font-semibold text-slate-500 hover:text-emerald-600 transition-colors"
+                    >
+                      Belum punya akun? <span className="text-emerald-600 underline">Daftar sekarang</span>
+                    </button>
+                  </div>
 
               <div className="relative py-2">
                 <div className="absolute inset-0 flex items-center">
                   <div className="w-full border-t border-slate-200"></div>
                 </div>
                 <div className="relative flex justify-center text-xs uppercase tracking-widest font-bold">
-                  <span className="px-4 bg-white lg:bg-slate-50 text-slate-400">Alternative Login</span>
+                  <span className="px-4 bg-white lg:bg-slate-50 text-slate-400">Pilihan Lain</span>
                 </div>
               </div>
 
@@ -1678,13 +1786,78 @@ const Login = () => {
                 type="button"
                 onClick={handleGoogleLogin}
                 disabled={loading}
-                className="w-full flex items-center justify-center gap-3 bg-white border border-slate-200 text-slate-600 py-3 px-6 rounded-2xl hover:bg-slate-50 hover:border-slate-300 transition-all duration-300 font-semibold text-sm shadow-sm"
+                className="w-full flex items-center justify-center gap-3 bg-white border border-slate-200 text-slate-600 py-3 px-6 rounded-2xl hover:bg-slate-50 hover:border-emerald-300 transition-all duration-300 font-semibold text-sm shadow-sm"
               >
-                <img src="https://www.google.com/favicon.ico" alt="Google" className="w-4 h-4 grayscale opacity-70 group-hover:grayscale-0 group-hover:opacity-100 transition-all" />
-                Continue with Google
+                <img src="https://www.google.com/favicon.ico" alt="Google" className="w-4 h-4 grayscale opacity-70" />
+                Masuk dengan Google
               </button>
             </form>
           ) : (
+            <form onSubmit={handleEmailRegister} className="space-y-5">
+              <div className="space-y-2">
+                <h3 className="text-xl font-bold text-slate-900">Buat Akun Baru</h3>
+                <p className="text-sm text-slate-500">Mulai gunakan EnviroLIMS dengan mendaftar di bawah ini.</p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider">Nama Lengkap</label>
+                  <input 
+                    type="text" 
+                    required
+                    value={regData.displayName}
+                    onChange={(e) => setRegData({...regData, displayName: e.target.value})}
+                    placeholder="Contoh: Budi Santoso"
+                    className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider">Username / Email</label>
+                  <input 
+                    type="email" 
+                    required
+                    value={regData.email}
+                    onChange={(e) => setRegData({...regData, email: e.target.value})}
+                    placeholder="email@perusahaan.com"
+                    className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider">Kata Sandi</label>
+                  <input 
+                    type="password" 
+                    required
+                    value={regData.password}
+                    onChange={(e) => setRegData({...regData, password: e.target.value})}
+                    placeholder="Min. 6 karakter"
+                    className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full bg-emerald-600 text-white py-4 rounded-xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50"
+                >
+                  {loading ? 'Mendaftarkan...' : 'Daftar Sekarang'}
+                </button>
+              </div>
+
+              <div className="text-center pt-2">
+                <button 
+                  type="button"
+                  onClick={() => setIsRegister(false)}
+                  className="text-sm font-bold text-slate-500 hover:text-emerald-600"
+                >
+                  Sudah punya akun? <span className="text-emerald-600 underline">Masuk di sini</span>
+                </button>
+              </div>
+            </form>
+          )}
+        </>
+      ) : (
             <form onSubmit={handleResetPassword} className="space-y-6">
               <div className="space-y-2">
                 <h3 className="text-xl font-bold text-slate-900">Reset Password</h3>
@@ -1773,6 +1946,9 @@ const Sidebar = ({ isOpen, setIsOpen }: { isOpen: boolean, setIsOpen: (open: boo
 
   const allMenuItems = [
     { name: 'Overview', icon: LayoutDashboard, path: '/', id: 'dashboard' },
+    { name: 'Admin Sampling', icon: ClipboardList, path: '/sampling/admin', id: 'sampling_admin' },
+    { name: 'Tugas Sampling', icon: Briefcase, path: '/sampling/officer', id: 'sampling_officer' },
+    { name: 'Penerimaan Lab', icon: Scan, path: '/lab/login', id: 'login_team' },
     { 
       name: settings.sidebarLabTitle, 
       icon: Microscope, 
@@ -2129,12 +2305,48 @@ const Topbar = ({ onMenuClick }: { onMenuClick: () => void }) => {
 };
 
 const Dashboard = () => {
+  const { profile } = React.useContext(UserContext);
+  const navigate = React.useMemo(() => (path: string) => window.location.pathname = path, []);
+  /* Auto-redirect based on role if they hit the main dashboard */
+  React.useEffect(() => {
+    if (!profile) return;
+    if (profile.role === 'sampling_officer') window.location.pathname = '/sampling/officer';
+    if (profile.role === 'sampling_admin') window.location.pathname = '/sampling/admin';
+    if (profile.role === 'login_team') window.location.pathname = '/lab/login';
+  }, [profile]);
+
   const [stocks, setStocks] = useState<StockItem[]>([]);
   const [requisitions, setRequisitions] = useState<Requisition[]>([]);
   const [dailyUses, setDailyUses] = useState<DailyUse[]>([]);
   const [samples, setSamples] = useState<LabSample[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [vitals, setVitals] = useState({
+    inField: 0,
+    waitingLogin: 0,
+    labProgress: 0
+  });
+
+  useEffect(() => {
+    const unsubJobs = onSnapshot(collection(db, 'sampling_jobs'), (snap) => {
+      const docs = snap.docs.map(d => d.data());
+      setVitals(prev => ({
+        ...prev,
+        inField: docs.filter(d => d.status === 'IN_FIELD').length,
+        waitingLogin: docs.filter(d => d.status === 'SUBMITTED').length
+      }));
+    });
+
+    const unsubSamples = onSnapshot(collection(db, 'app_samples'), (snap) => {
+      const docs = snap.docs.map(d => d.data());
+      setVitals(prev => ({
+        ...prev,
+        labProgress: docs.filter(d => d.status === 'IN_PROGRESS').length
+      }));
+    });
+
+    return () => { unsubJobs(); unsubSamples(); };
+  }, []);
 
   const fetchData = async (retries = 3) => {
     try {
@@ -2276,57 +2488,90 @@ const Dashboard = () => {
     </div>
   );
 
+  const DashboardStat = ({ title, value, sub, icon: Icon, color, trend }: any) => {
+    const variants: any = {
+      blue: "bg-blue-50 text-blue-600 border-blue-100 shadow-blue-500/5",
+      emerald: "bg-emerald-50 text-emerald-600 border-emerald-100 shadow-emerald-500/5",
+      amber: "bg-amber-50 text-amber-600 border-amber-100 shadow-amber-500/5",
+      rose: "bg-rose-50 text-rose-600 border-rose-100 shadow-rose-500/5"
+    };
+    return (
+      <motion.div 
+        whileHover={{ y: -5 }}
+        className={cn("p-6 rounded-[32px] border shadow-sm transition-all bg-white flex flex-col justify-between h-full", variants[color])}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <div className="p-2 rounded-xl bg-white shadow-sm">
+             <Icon size={20} />
+          </div>
+          <span className="text-[10px] font-black uppercase tracking-widest opacity-60 italic">{trend}</span>
+        </div>
+        <div>
+           <h4 className="text-3xl font-black text-slate-900 leading-none mb-1">{value}</h4>
+           <p className="text-xs font-bold text-slate-600 uppercase tracking-tight">{title}</p>
+           <p className="text-[10px] text-slate-400 font-medium italic mt-2">{sub}</p>
+        </div>
+      </motion.div>
+    );
+  };
+
   return (
     <div className="space-y-10 pb-10">
-      <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-3xl font-black text-slate-900 tracking-tight">Overview</h1>
-          <p className="text-slate-500 font-medium">Welcome back! Here's what's happening with your inventory today.</p>
+      <header className="flex flex-col md:flex-row md:items-center justify-between gap-6 bg-white p-8 rounded-[32px] border border-slate-200 shadow-sm relative overflow-hidden">
+        <div className="relative z-10">
+          <h1 className="text-3xl font-black text-slate-900 tracking-tight uppercase mb-1">Operational Command</h1>
+          <p className="text-slate-500 font-medium italic">Sistem Monitoring Terpadu: Lapangan, Laboratorium, dan Inventaris.</p>
         </div>
-        <div className="flex items-center gap-3">
-          <button className="px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all flex items-center gap-2 shadow-sm">
-            <Calendar size={16} />
-            Last 30 Days
-          </button>
-          <button className="px-4 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-bold hover:bg-blue-700 transition-all flex items-center gap-2 shadow-lg shadow-blue-500/20">
-            <Download size={16} />
-            Export Report
-          </button>
+        <div className="hidden lg:flex items-center gap-4 relative z-10 bg-slate-50 p-2 rounded-2xl border border-slate-100">
+           <div className="flex -space-x-2">
+              {[1, 2, 3].map(i => (
+                <div key={i} className="w-8 h-8 rounded-full border-2 border-white bg-blue-100 flex items-center justify-center text-[10px] font-black text-blue-600">
+                  U{i}
+                </div>
+              ))}
+           </div>
+           <div className="h-8 w-px bg-slate-200 mx-2" />
+           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long' })}</p>
+        </div>
+        <div className="absolute top-0 right-0 p-8 text-blue-50 opacity-10 pointer-events-none">
+           <LayoutDashboard className="w-32 h-32" />
         </div>
       </header>
 
-      {/* KPI Cards */}
+      {/* KPI Vitals */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {stats.map((stat, idx) => (
-          <motion.div 
-            key={stat.name}
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: idx * 0.1 }}
-            className="premium-card p-6 group"
-          >
-            <div className="flex items-start justify-between mb-4">
-              <div className={cn("p-3 rounded-xl shadow-sm transition-transform group-hover:scale-110", stat.bg, stat.color)}>
-                <stat.icon size={24} />
-              </div>
-              <div className={cn(
-                "flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold",
-                stat.trendUp ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-600"
-              )}>
-                {stat.trendUp ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
-                {stat.trend}
-              </div>
-            </div>
-            <div>
-              <p className="text-sm font-bold text-slate-500 mb-1">{stat.name}</p>
-              <div className="flex items-baseline gap-2">
-                <h3 className="text-3xl font-black text-slate-900 tracking-tight">{stat.value}</h3>
-                <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Items</span>
-              </div>
-              <p className="text-[10px] text-slate-400 mt-4 font-medium leading-relaxed">{stat.description}</p>
-            </div>
-          </motion.div>
-        ))}
+         <DashboardStat 
+           title="Field Ops" 
+           value={vitals.inField} 
+           sub="Tim Sampling Aktif" 
+           icon={MapPin} 
+           color="emerald" 
+           trend="Live" 
+         />
+         <DashboardStat 
+           title="Sample Reception" 
+           value={vitals.waitingLogin} 
+           sub="Antrian Verifikasi Login" 
+           icon={Scan} 
+           color="amber" 
+           trend="Pending" 
+         />
+         <DashboardStat 
+           title="Lab Progress" 
+           value={vitals.labProgress} 
+           sub="Sampel sedang di-Analisa" 
+           icon={Beaker} 
+           color="blue" 
+           trend="In Work" 
+         />
+         <DashboardStat 
+           title="Critical Items" 
+           value={lowStockItems.length} 
+           sub="Stok Reagent Menipis" 
+           icon={Package} 
+           color="rose" 
+           trend="Action" 
+         />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -4712,6 +4957,7 @@ const PurchasingView = () => {
 
 const LabModule = ({ type, title }: { type: LabSample['type'], title: string }) => {
   const [samples, setSamples] = useState<LabSample[]>([]);
+  const [workflowSamples, setWorkflowSamples] = useState<any[]>([]);
   const [isAdding, setIsAdding] = useState(false);
   const [newSample, setNewSample] = useState({ sampleName: '' });
   const { profile, expiryThreshold } = React.useContext(UserContext);
@@ -4846,6 +5092,26 @@ const LabModule = ({ type, title }: { type: LabSample['type'], title: string }) 
     }
   };
 
+  const productivityData = useMemo(() => {
+    const days: { [key: string]: number } = {};
+    const last7Days = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      return d.toISOString().split('T')[0];
+    }).reverse();
+
+    last7Days.forEach(day => days[day] = 0);
+
+    workflowSamples.forEach(s => {
+      if (s.status === 'COMPLETED' && s.completedAt) {
+        const day = new Date(s.completedAt.seconds * 1000).toISOString().split('T')[0];
+        if (days[day] !== undefined) days[day]++;
+      }
+    });
+
+    return Object.entries(days).map(([name, count]) => ({ name: new Date(name).toLocaleDateString('id-ID', { day: '2-digit', month: 'short' }), count }));
+  }, [workflowSamples]);
+
   const loadAllData = async () => {
     setError(null);
     try {
@@ -4865,6 +5131,23 @@ const LabModule = ({ type, title }: { type: LabSample['type'], title: string }) 
 
   useEffect(() => {
     loadAllData();
+  }, [type, activeTab]);
+
+  useEffect(() => {
+    if (activeTab === 'samples' || activeTab === 'summary') {
+      const q = query(
+        collection(db, 'app_samples'),
+        where('status', 'in', ['VERIFIED', 'IN_PROGRESS', 'NEEDS_QC', 'COMPLETED']),
+        where('labType', '==', type)
+      );
+
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setWorkflowSamples(data);
+      });
+
+      return () => unsubscribe();
+    }
   }, [type, activeTab]);
 
   const handleAddSample = async (e: React.FormEvent) => {
@@ -4978,6 +5261,18 @@ const LabModule = ({ type, title }: { type: LabSample['type'], title: string }) 
       }
     } catch (error) {
       console.error('Error updating status:', error);
+    }
+  };
+
+  const updateWorkflowSample = async (id: string, updates: any) => {
+    try {
+      await updateDoc(doc(db, 'app_samples', id), {
+        ...updates,
+        updatedAt: serverTimestamp()
+      });
+    } catch (error) {
+      console.error('Error updating workflow sample:', error);
+      alert('Gagal memperbarui data sampel');
     }
   };
 
@@ -5139,9 +5434,9 @@ const LabModule = ({ type, title }: { type: LabSample['type'], title: string }) 
             </div>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             {/* Stock Alerts */}
-            <div className="bg-white p-6 lg:p-8 rounded-3xl border border-slate-100 shadow-sm space-y-6">
+            <div className="lg:col-span-1 bg-white p-6 lg:p-8 rounded-3xl border border-slate-100 shadow-sm space-y-6">
               <div className="flex items-center justify-between">
                 <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Stock Alerts</h3>
                 <div className="p-2 bg-rose-50 rounded-xl text-rose-500">
@@ -5191,8 +5486,52 @@ const LabModule = ({ type, title }: { type: LabSample['type'], title: string }) 
               </div>
             </div>
 
+            {/* Productivity Chart */}
+            <div className="lg:col-span-2 bg-white p-6 lg:p-8 rounded-3xl border border-slate-100 shadow-sm space-y-6">
+              <div className="flex items-center justify-between">
+                <div className="space-y-1">
+                  <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Analis Productivity</h3>
+                  <p className="text-[10px] text-slate-400 font-bold uppercase">Jumlah sampel selesai dalam 7 hari terakhir</p>
+                </div>
+                <div className="p-2 bg-emerald-50 rounded-xl text-emerald-500">
+                  <TrendingUp size={20} />
+                </div>
+              </div>
+              <div className="h-[250px] w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={productivityData}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                    <XAxis 
+                      dataKey="name" 
+                      axisLine={false} 
+                      tickLine={false} 
+                      tick={{ fontSize: 10, fontWeight: 700, fill: '#94a3b8' }}
+                      dy={10}
+                    />
+                    <YAxis 
+                      axisLine={false} 
+                      tickLine={false} 
+                      tick={{ fontSize: 10, fontWeight: 700, fill: '#94a3b8' }}
+                    />
+                    <Tooltip 
+                      cursor={{ fill: '#f8fafc' }}
+                      contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)', padding: '12px' }}
+                      itemStyle={{ fontSize: '12px', fontWeight: 900, color: '#0f172a' }}
+                    />
+                    <Bar 
+                      dataKey="count" 
+                      fill="#3b82f6" 
+                      radius={[6, 6, 0, 0]} 
+                      barSize={40}
+                      animationDuration={1500}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
             {/* Recent Usage */}
-            <div className="bg-white p-6 lg:p-8 rounded-3xl border border-slate-100 shadow-sm space-y-6">
+            <div className="lg:col-span-1 bg-white p-6 lg:p-8 rounded-3xl border border-slate-100 shadow-sm space-y-6">
               <div className="flex items-center justify-between">
                 <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Recent Usage</h3>
                 <div className="p-2 bg-blue-50 rounded-xl text-blue-500">
@@ -5314,7 +5653,148 @@ const LabModule = ({ type, title }: { type: LabSample['type'], title: string }) 
                     </td>
                   </tr>
                 ))}
-                {samples.length === 0 && (
+
+                {/* Workflow Samples Section */}
+                {workflowSamples.length > 0 && (
+                  <tr className="bg-slate-100/50">
+                    <td colSpan={4} className="px-6 py-2 text-[10px] font-black text-slate-500 uppercase tracking-widest">
+                      Workflow Samples (From Field)
+                    </td>
+                  </tr>
+                )}
+                {workflowSamples.map((sample) => {
+                  const isOverdue = sample.deadlineAt && new Date(sample.deadlineAt.seconds * 1000) < new Date();
+                  const lowStockItems = stock.filter(i => i.quantity <= i.minStock);
+
+                  return (
+                    <tr key={sample.id} className={cn(
+                      "hover:bg-blue-50/30 transition-all border-l-4",
+                      isOverdue ? "border-rose-500 bg-rose-50/30" : "border-blue-500"
+                    )}>
+                      <td className="px-6 py-4">
+                        <div className="flex flex-col">
+                          <span className="font-black text-slate-900 uppercase tracking-tight">{sample.sampleName}</span>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <span className="text-[10px] font-bold text-slate-400 capitalize">{sample.type}</span>
+                            <span className="text-[10px] font-black text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-md border border-blue-100 flex items-center gap-1">
+                              <ThermometerSnowflake className="w-2.5 h-2.5" />
+                              {sample.chillerLocation || 'No Loc'}
+                            </span>
+                          </div>
+                          <span className="text-[9px] font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded w-fit mt-1">
+                             Metode: {sample.method || 'Default Standard'}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex flex-col gap-1">
+                          <span className={cn(
+                            "px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tight w-fit",
+                            sample.status === 'VERIFIED' && "bg-amber-100 text-amber-600",
+                            sample.status === 'IN_PROGRESS' && "bg-indigo-100 text-indigo-600",
+                            sample.status === 'COMPLETED' && "bg-emerald-100 text-emerald-600",
+                            sample.status === 'NEEDS_QC' && "bg-rose-100 text-rose-600",
+                          )}>
+                            {sample.status.replace('_', ' ')}
+                          </span>
+                          {sample.deadlineAt && (
+                            <span className={cn(
+                              "text-[9px] font-black uppercase flex items-center gap-1",
+                              isOverdue ? "text-rose-600" : "text-slate-400"
+                            )}>
+                               <Clock className="w-3 h-3" />
+                               {isOverdue ? 'Overdue' : 'Target:'} {new Date(sample.deadlineAt.seconds * 1000).toLocaleDateString()}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                         <div className="flex flex-col gap-2">
+                            <span className="text-[10px] text-slate-500 font-bold uppercase">
+                              {sample.verifiedAt ? new Date(sample.verifiedAt.seconds * 1000).toLocaleDateString() : '-'}
+                            </span>
+                            {lowStockItems.length > 0 && sample.status !== 'COMPLETED' && (
+                               <div className="flex items-center gap-1.5 p-1.5 bg-rose-50 border border-rose-100 rounded-lg text-rose-600 animate-pulse">
+                                  <AlertCircle className="w-3 h-3" />
+                                  <span className="text-[8px] font-black uppercase">Stock Warning: {lowStockItems.length} Reagents Low</span>
+                               </div>
+                            )}
+                         </div>
+                      </td>
+                      <td className="px-6 py-4 text-right space-x-2">
+                        <div className="flex items-center justify-end gap-2">
+                          {sample.status === 'VERIFIED' && (
+                            <button 
+                              onClick={() => updateWorkflowSample(sample.id, { 
+                                status: 'IN_PROGRESS', 
+                                analystId: profile?.uid, 
+                                analystName: profile?.displayName,
+                                startedAt: Timestamp.now()
+                              })}
+                              className="text-[10px] font-black bg-blue-600 text-white px-3 py-1.5 rounded-lg uppercase tracking-widest hover:bg-blue-700 transition-all shadow-md active:scale-95"
+                            >
+                              Claim
+                            </button>
+                          )}
+                          {sample.status === 'IN_PROGRESS' && (
+                            <div className="flex items-center gap-2">
+                              <input 
+                                type="text" 
+                                placeholder="Kadar..."
+                                className="w-20 px-2 py-1 text-xs border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    // Option to flow into QC check
+                                    const nextStatus = sample.type === 'mikrobiologi' ? 'NEEDS_QC' : 'COMPLETED';
+                                    updateWorkflowSample(sample.id, { 
+                                      result: (e.target as HTMLInputElement).value, 
+                                      status: nextStatus,
+                                      completedAt: Timestamp.now()
+                                    });
+                                  }
+                                }}
+                              />
+                            </div>
+                          )}
+                          {sample.status === 'NEEDS_QC' && profile?.role === 'admin' && (
+                             <button 
+                               onClick={() => updateWorkflowSample(sample.id, { status: 'COMPLETED', qcVerifiedBy: profile?.uid })}
+                               className="text-[10px] font-black bg-emerald-600 text-white px-3 py-1.5 rounded-lg uppercase tracking-widest hover:bg-emerald-700 transition-all"
+                             >
+                               Verify QC
+                             </button>
+                          )}
+                          {sample.status === 'COMPLETED' && (
+                            <div className="flex flex-col items-end">
+                               <span className="text-[10px] font-black text-emerald-600 uppercase border border-emerald-200 bg-emerald-50 px-2 py-1 rounded-md">
+                                 Res: {sample.result || '-'}
+                               </span>
+                               {sample.startedAt && sample.completedAt && (
+                                  <span className="text-[8px] text-slate-400 font-bold uppercase mt-1">
+                                     TAT: {Math.floor((sample.completedAt.seconds - sample.startedAt.seconds) / 60)} Mins
+                                  </span>
+                               )}
+                            </div>
+                          )}
+                          {(profile?.role === 'admin' || profile?.role === 'analyst') && (
+                            <select 
+                              value={sample.status}
+                              onChange={(e) => updateWorkflowSample(sample.id, { status: e.target.value })}
+                              className="text-[10px] border border-slate-200 rounded-lg px-2 py-1 outline-none font-bold uppercase tracking-tight"
+                            >
+                              <option value="VERIFIED">Verified</option>
+                              <option value="IN_PROGRESS">Progress</option>
+                              <option value="NEEDS_QC">Needs QC</option>
+                              <option value="COMPLETED">Done</option>
+                            </select>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+
+                {samples.length === 0 && workflowSamples.length === 0 && (
                   <tr>
                     <td colSpan={4} className="px-6 py-12 text-center text-slate-400">No samples found for this category.</td>
                   </tr>
@@ -6848,6 +7328,9 @@ const SettingsView = () => {
                   <option value="analyst">Analyst</option>
                   <option value="warehouse_manager">Warehouse Manager</option>
                   <option value="purchasing">Purchasing</option>
+                  <option value="sampling_admin">Admin Sampling</option>
+                  <option value="sampling_officer">Petugas Sampling</option>
+                  <option value="login_team">Lab Login Team</option>
                 </select>
               </div>
               <div className="md:col-span-4 flex justify-end">
@@ -6903,6 +7386,9 @@ const SettingsView = () => {
                           <option value="analyst">Analyst</option>
                           <option value="warehouse_manager">Warehouse Manager</option>
                           <option value="purchasing">Purchasing</option>
+                          <option value="sampling_admin">Admin Sampling</option>
+                          <option value="sampling_officer">Petugas Sampling</option>
+                          <option value="login_team">Lab Login Team</option>
                         </select>
                       </td>
                       <td className="px-8 py-4">
@@ -6910,6 +7396,10 @@ const SettingsView = () => {
                           <div className="grid grid-cols-2 gap-x-4 gap-y-2">
                             {[
                               { id: 'dashboard', label: 'Dashboard' },
+                              { id: 'sampling_admin', label: 'Admin Sampling' },
+                              { id: 'sampling_officer', label: 'Tugas Sampling' },
+                              { id: 'login_team', label: 'Lab Login' },
+                              { id: 'analyst_lab', label: 'Lab Analis' },
                               { id: 'lab', label: 'Lab' },
                               { id: 'stock_lab', label: 'Stok Lab' },
                               { id: 'stock_warehouse', label: 'Stok Gudang' },
@@ -7923,7 +8413,7 @@ const MasterDataView = () => {
 
 
 const Layout = () => {
-  const { settings } = React.useContext(UserContext);
+  const { user, settings, addNotification } = React.useContext(UserContext);
   const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth > 1024);
 
   return (
@@ -7934,6 +8424,9 @@ const Layout = () => {
         <main className="flex-1 p-4 sm:p-6 lg:p-10 overflow-y-auto max-w-7xl mx-auto w-full">
           <Routes>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/sampling/admin" element={<SamplingAdminDashboard user={user} onNotify={addNotification} />} />
+            <Route path="/sampling/officer" element={<SamplingDashboard user={user} onNotify={addNotification} />} />
+            <Route path="/lab/login" element={<LabLoginDashboard user={user} onNotify={addNotification} />} />
             <Route path="/lab/udara" element={<LabModule type="udara" title="Lab Udara" />} />
             <Route path="/lab/air" element={<LabModule type="air" title="Lab Air" />} />
             <Route path="/lab/b3_tanah" element={<LabModule type="b3_tanah" title="Lab B3 & Tanah" />} />

@@ -7,6 +7,17 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import admin from 'firebase-admin';
 
+import fs from 'fs';
+
+// Handle global errors to prevent silent crashes
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
 dotenv.config();
 
 // Initialize Firebase Admin
@@ -36,11 +47,21 @@ if (!supportedDialects.includes(dbDialect)) {
   dbDialect = 'sqlite';
 }
 
+// Ensure data directory exists for SQLite in production
+const sqliteStorage = process.env.NODE_ENV === 'production' ? './data/database.sqlite' : './database.sqlite';
+if (dbDialect === 'sqlite' && process.env.NODE_ENV === 'production') {
+  const dir = path.dirname(sqliteStorage);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+    console.log(`Created directory: ${dir}`);
+  }
+}
+
 const sequelize = new Sequelize(dbName, dbUser, dbPass, {
   host: dbHost,
   port: dbPort,
   dialect: dbDialect as any,
-  storage: dbDialect === 'sqlite' ? (process.env.NODE_ENV === 'production' ? './data/database.sqlite' : './database.sqlite') : undefined,
+  storage: dbDialect === 'sqlite' ? sqliteStorage : undefined,
   logging: false,
 });
 
@@ -50,7 +71,7 @@ User.init({
   uid: { type: DataTypes.STRING, primaryKey: true },
   email: { type: DataTypes.STRING, unique: true },
   displayName: { type: DataTypes.STRING },
-  role: { type: DataTypes.ENUM('admin', 'analyst', 'warehouse_manager', 'purchasing'), defaultValue: 'analyst' },
+  role: { type: DataTypes.ENUM('admin', 'analyst', 'warehouse_manager', 'purchasing', 'sampling_admin', 'sampling_officer', 'login_team'), defaultValue: 'analyst' },
   permissions: { type: DataTypes.TEXT }, // JSON string of permissions
 }, { sequelize, modelName: 'user' });
 
@@ -212,14 +233,22 @@ async function syncDatabase() {
         mikrobiologi: 'Lab Mikrobiologi'
       }) },
       { key: 'rolePermissions', value: JSON.stringify({
-        admin: ['dashboard', 'lab', 'stock_lab', 'stock_warehouse', 'master_data', 'purchasing', 'reports', 'settings'],
+        admin: ['dashboard', 'lab', 'stock_lab', 'stock_warehouse', 'master_data', 'purchasing', 'reports', 'settings', 'sampling_admin', 'sampling_officer', 'login_team', 'analyst_lab'],
         warehouse_manager: ['dashboard', 'stock_warehouse', 'master_data'],
         purchasing: ['dashboard', 'purchasing'],
-        analyst: ['dashboard', 'lab', 'stock_lab', 'reports']
+        analyst: ['dashboard', 'analyst_lab', 'stock_lab', 'reports', 'settings'],
+        sampling_admin: ['dashboard', 'sampling_admin', 'settings'],
+        sampling_officer: ['dashboard', 'sampling_officer', 'settings'],
+        login_team: ['dashboard', 'login_team', 'lab', 'settings']
       }) }
     ];
     for (const d of defaults) {
-      await AppSettings.findOrCreate({ where: { key: d.key }, defaults: d });
+      if (d.key === 'rolePermissions') {
+        // Force update rolePermissions to include new roles
+        await AppSettings.upsert(d);
+      } else {
+        await AppSettings.findOrCreate({ where: { key: d.key }, defaults: d });
+      }
     }
     console.log('Database synced successfully');
   } catch (error) {

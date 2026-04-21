@@ -8,27 +8,61 @@
         "uid": { "type": "string" },
         "email": { "type": "string", "format": "email" },
         "displayName": { "type": "string" },
-        "role": { "type": "string", "enum": ["admin", "analyst", "warehouse_manager"] },
+        "role": { "type": "string", "enum": ["admin", "analyst", "warehouse_manager", "sampling_admin", "sampling_officer", "login_team"] },
         "permissions": { "type": "array", "items": { "type": "string" } },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email", "role"]
     },
-    "LabSample": {
-      "title": "Lab Sample",
-      "description": "Lab sample data for different lab types",
+    "SamplingJob": {
+      "title": "Sampling Job",
+      "description": "A penugasan (surat tugas) for sampling activities",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
-        "type": { "type": "string", "enum": ["udara", "air", "b3_tanah", "mikrobiologi"] },
-        "sampleName": { "type": "string" },
-        "status": { "type": "string", "enum": ["pending", "in-progress", "completed"] },
-        "analystId": { "type": "string" },
-        "result": { "type": "string" },
-        "createdAt": { "type": "string", "format": "date-time" },
-        "updatedAt": { "type": "string", "format": "date-time" }
+        "customerName": { "type": "string" },
+        "status": { "type": "string", "enum": ["PLANNED", "IN_FIELD", "SUBMITTED", "RECEIVED", "COMPLETED"] },
+        "assignedTo": { "type": "string" },
+        "location": { "type": "string" },
+        "stpsNumber": { "type": "string" },
+        "plannedDate": { "type": "string" },
+        "fieldData": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["type", "sampleName", "status"]
+      "required": ["customerName", "status", "assignedTo"]
+    },
+    "AppSample": {
+      "title": "Application Sample",
+      "description": "Individual sample tracking from field to lab",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "jobId": { "type": "string" },
+        "sampleName": { "type": "string" },
+        "type": { "type": "string", "enum": ["udara", "air", "b3_tanah", "mikrobiologi"] },
+        "status": { "type": "string", "enum": ["PENDING", "VERIFIED", "ANALYZING", "COMPLETED"] },
+        "analystId": { "type": "string" },
+        "chillerLocation": { "type": "string" },
+        "labResults": { "type": "object" },
+        "verifiedAt": { "type": "string", "format": "date-time" },
+        "completedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["jobId", "sampleName", "type", "status"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "System notification for users",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "recipientId": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "type": { "type": "string", "enum": ["info", "warning", "error", "success"] },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recipientId", "title", "message", "type", "read"]
     },
     "StockItem": {
       "title": "Stock Item",
@@ -53,9 +87,17 @@
       "schema": "User",
       "description": "User profiles"
     },
-    "/samples/{sampleId}": {
-      "schema": "LabSample",
-      "description": "Lab samples"
+    "/sampling_jobs/{jobId}": {
+      "schema": "SamplingJob",
+      "description": "Sampling penugasan"
+    },
+    "/app_samples/{sampleId}": {
+      "schema": "AppSample",
+      "description": "Detailed sample tracking"
+    },
+    "/notifications/{notifId}": {
+      "schema": "Notification",
+      "description": "User notifications"
     },
     "/stocks/{stockId}": {
       "schema": "StockItem",

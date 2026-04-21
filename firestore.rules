@@ -2,78 +2,152 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     // ===============================================================
+    // 0. Default Deny
+    // ===============================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
     // Helper Functions
     // ===============================================================
-    function isAuthenticated() {
-      return request.auth != null;
-    }
-
-    function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
-    }
-
+    function isSignedIn() { return request.auth != null; }
+    function isEmailVerified() { return request.auth.token.email_verified == true; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    
     function getUserData() {
       return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
     }
+    
+    function getRole() {
+      return getUserData().role;
+    }
 
     function isAdmin() {
-      return isAuthenticated() && (
-        getUserData().role == 'admin' ||
-        (request.auth.token.email == "gkrismantara@gmail.com" && request.auth.token.email_verified == true)
+      return isSignedIn() && (
+        getRole() == 'admin' || 
+        (request.auth.token.email == "gkrismantara@gmail.com" && isEmailVerified())
       );
     }
-
-    function isAnalyst() {
-      return isAuthenticated() && (getUserData().role == 'analyst' || isAdmin());
+    
+    function hasAnyRole(roles) {
+      return isSignedIn() && (getRole() in roles || isAdmin());
     }
 
-    function isWarehouseManager() {
-      return isAuthenticated() && (getUserData().role == 'warehouse_manager' || isAdmin());
-    }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
 
     // ===============================================================
-    // Validation Functions
+    // Validation Blueprints
     // ===============================================================
+    
     function isValidUser(data) {
       return data.keys().hasAll(['uid', 'email', 'role']) &&
              data.uid is string &&
              data.email is string &&
-             data.role in ['admin', 'analyst', 'warehouse_manager'];
+             data.role in ['admin', 'analyst', 'warehouse_manager', 'sampling_admin', 'sampling_officer', 'login_team'];
     }
 
-    function isValidSample(data) {
-      return data.keys().hasAll(['type', 'sampleName', 'status']) &&
+    function isValidSamplingJob(data) {
+      return data.keys().hasAll(['customerName', 'status', 'assignedTo']) &&
+             data.customerName is string && data.customerName.size() <= 255 &&
+             data.status in ['PLANNED', 'IN_FIELD', 'SUBMITTED', 'RECEIVED', 'COMPLETED'] &&
+             data.assignedTo is string;
+    }
+
+    function isValidAppSample(data) {
+      return data.keys().hasAll(['jobId', 'sampleName', 'type', 'status']) &&
+             data.jobId is string &&
+             data.sampleName is string && data.sampleName.size() <= 255 &&
              data.type in ['udara', 'air', 'b3_tanah', 'mikrobiologi'] &&
-             data.status in ['pending', 'in-progress', 'completed'];
+             data.status in ['PENDING', 'VERIFIED', 'ANALYZING', 'COMPLETED'];
     }
 
-    function isValidStock(data) {
-      return data.keys().hasAll(['name', 'quantity', 'unit', 'location']) &&
-             data.quantity is number &&
-             data.location in ['lab', 'warehouse'];
+    function isValidNotification(data) {
+      return data.keys().hasAll(['recipientId', 'title', 'message', 'type', 'read']) &&
+             data.recipientId is string &&
+             data.title is string && data.title.size() <= 255 &&
+             data.message is string && data.message.size() <= 2000 &&
+             data.type in ['info', 'warning', 'error', 'success'] &&
+             data.read is bool;
     }
 
     // ===============================================================
-    // Rules
+    // Collection Match Blocks
     // ===============================================================
+
     match /users/{userId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role);
+      allow get: if isSignedIn();
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && isOwner(userId) && isValidUser(incoming());
+      allow update: if (isAdmin() || isOwner(userId)) && 
+                      (isAdmin() || incoming().role == existing().role);
+    }
+
+    match /sampling_jobs/{jobId} {
+      allow get: if isSignedIn() && (
+        hasAnyRole(['admin', 'sampling_admin', 'login_team', 'analyst']) || 
+        existing().assignedTo == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        hasAnyRole(['admin', 'sampling_admin', 'login_team', 'analyst']) || 
+        resource.data.assignedTo == request.auth.uid
+      );
+      allow create: if hasAnyRole(['admin', 'sampling_admin']) && isValidSamplingJob(incoming()) && isValidId(jobId);
+      allow update: if (
+        hasAnyRole(['admin', 'sampling_admin']) && isValidSamplingJob(incoming())
+      ) || (
+        getRole() == 'sampling_officer' && 
+        existing().assignedTo == request.auth.uid &&
+        incoming().status in ['IN_FIELD', 'SUBMITTED'] &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'fieldData', 'updatedAt'])
+      ) || (
+        getRole() == 'login_team' &&
+        incoming().status in ['RECEIVED', 'COMPLETED'] &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+      );
       allow delete: if isAdmin();
     }
 
-    match /samples/{sampleId} {
-      allow read: if isAuthenticated();
-      allow create: if isAnalyst() && isValidSample(request.resource.data);
-      allow update: if isAnalyst() && isValidSample(request.resource.data);
+    match /app_samples/{sampleId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn() && (
+        hasAnyRole(['admin', 'sampling_admin', 'login_team', 'analyst']) ||
+        exists(/databases/$(database)/documents/sampling_jobs/$(resource.data.jobId)) && 
+        get(/databases/$(database)/documents/sampling_jobs/$(resource.data.jobId)).data.assignedTo == request.auth.uid
+      );
+      allow create: if (
+        hasAnyRole(['admin', 'sampling_admin', 'sampling_officer']) && 
+        isValidAppSample(incoming()) && isValidId(sampleId) &&
+        exists(/databases/$(database)/documents/sampling_jobs/$(incoming().jobId))
+      );
+      allow update: if (
+        hasAnyRole(['admin', 'sampling_admin']) && isValidAppSample(incoming())
+      ) || (
+        getRole() == 'login_team' &&
+        incoming().status == 'VERIFIED' &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'chillerLocation', 'verifiedAt', 'updatedAt'])
+      ) || (
+        getRole() == 'analyst' &&
+        incoming().status in ['ANALYZING', 'COMPLETED'] &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'analystId', 'labResults', 'completedAt', 'updatedAt'])
+      );
       allow delete: if isAdmin();
+    }
+
+    match /notifications/{notifId} {
+      allow read: if isOwner(existing().recipientId);
+      allow create: if isSignedIn() && isValidNotification(incoming());
+      allow update: if isOwner(existing().recipientId) && 
+                      incoming().diff(existing()).affectedKeys().hasOnly(['read', 'updatedAt']);
+      allow delete: if isOwner(existing().recipientId) || isAdmin();
     }
 
     match /stocks/{stockId} {
-      allow read: if isAuthenticated();
-      allow create: if isWarehouseManager() && isValidStock(request.resource.data);
-      allow update: if isWarehouseManager() && isValidStock(request.resource.data);
+      allow read: if isSignedIn();
+      allow create: if hasAnyRole(['admin', 'warehouse_manager']) && incoming().quantity is number;
+      allow update: if hasAnyRole(['admin', 'warehouse_manager', 'analyst']);
       allow delete: if isAdmin();
     }
   }
