@@ -73,6 +73,7 @@ User.init({
   displayName: { type: DataTypes.STRING },
   role: { type: DataTypes.ENUM('admin', 'analyst', 'warehouse_manager', 'purchasing', 'sampling_admin', 'sampling_officer', 'login_team'), defaultValue: 'analyst' },
   permissions: { type: DataTypes.TEXT }, // JSON string of permissions
+  notificationPreferences: { type: DataTypes.TEXT }, // JSON string of notification preferences
 }, { sequelize, modelName: 'user' });
 
 class LabSample extends Model {}
@@ -391,6 +392,15 @@ async function startServer() {
       if (userData.permissions) {
         userData.permissions = JSON.parse(userData.permissions);
       }
+      if (userData.notificationPreferences) {
+        userData.notificationPreferences = JSON.parse(userData.notificationPreferences);
+      } else {
+        // Default preferences
+        userData.notificationPreferences = {
+          newJobAssignment: true,
+          statusUpdate: true,
+        };
+      }
       res.json(userData);
     } catch (error) {
       console.error('Auth sync error:', error);
@@ -528,6 +538,30 @@ async function startServer() {
       res.json({ success: true });
     } catch (error) {
       console.error('Update user permissions error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.put('/api/users/:uid/preferences', async (req, res) => {
+    try {
+      const { preferences, requesterUid } = req.body;
+      const { uid } = req.params;
+
+      // Security Check: Only the user themselves or an admin can update preferences
+      if (requesterUid !== uid) {
+        const adminUser = await User.findByPk(requesterUid);
+        if (!adminUser || adminUser.get('role') !== 'admin') {
+          return res.status(403).json({ error: 'Unauthorized.' });
+        }
+      }
+
+      await User.update({ 
+        notificationPreferences: preferences ? JSON.stringify(preferences) : null 
+      }, { where: { uid } });
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Update user preferences error:', error);
       res.status(500).json({ error: 'Internal server error' });
     }
   });

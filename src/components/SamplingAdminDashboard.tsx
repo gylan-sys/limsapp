@@ -30,13 +30,17 @@ import {
   addDoc,
   Timestamp,
   getDocs,
-  deleteDoc
+  getDoc,
+  deleteDoc,
+  updateDoc,
+  serverTimestamp
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../lib/utils';
 import * as XLSX from 'xlsx';
 import { QRCodeCanvas } from 'qrcode.react';
+import { UserContext } from '../App';
 
 interface SamplingAdminDashboardProps {
   user: any;
@@ -44,6 +48,7 @@ interface SamplingAdminDashboardProps {
 }
 
 const SamplingAdminDashboard: React.FC<SamplingAdminDashboardProps> = ({ user, onNotify }) => {
+  const { profile, updateProfile } = React.useContext(UserContext);
   const [jobs, setJobs] = useState<any[]>([]);
   const [officers, setOfficers] = useState<any[]>([]);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -130,15 +135,21 @@ const SamplingAdminDashboard: React.FC<SamplingAdminDashboardProps> = ({ user, o
         }
       }
 
-      // 3. Notify the Officer
-      await addDoc(collection(db, 'notifications'), {
-        recipientId: newJob.assignedTo,
-        title: 'Penugasan Sampling Baru',
-        message: `Anda ditugaskan untuk mengambil sampel di ${newJob.customerName} pada ${newJob.plannedDate}.`,
-        type: 'info',
-        read: false,
-        createdAt: Timestamp.now()
-      });
+      // 3. Notify the Officer (if opted in)
+      const officerDoc = await getDoc(doc(db, 'users', newJob.assignedTo));
+      const officerPrefs = officerDoc.exists() ? officerDoc.data()?.notificationPreferences : null;
+      
+      if (!officerPrefs || officerPrefs.newJobAssignment !== false) {
+        await addDoc(collection(db, 'notifications'), {
+          recipientId: newJob.assignedTo,
+          title: 'Penugasan Sampling Baru',
+          message: `Anda ditugaskan untuk mengambil sampel di ${newJob.customerName} pada ${newJob.plannedDate}.`,
+          type: 'info',
+          category: 'new_job',
+          read: false,
+          createdAt: serverTimestamp()
+        });
+      }
 
       setShowAddModal(false);
       setNewJob({ customerName: '', location: '', stpsNumber: '', plannedDate: '', assignedTo: '', deadlineDate: '', status: 'PLANNED' as const });
@@ -217,22 +228,131 @@ const SamplingAdminDashboard: React.FC<SamplingAdminDashboardProps> = ({ user, o
           <h1 className="text-3xl font-black text-slate-900 tracking-tight uppercase mb-2">Sampling Administrator</h1>
           <p className="text-slate-500 font-medium">Pengaturan tim lapangan, manajemen STPS, dan penugasan personil.</p>
         </div>
-        <button 
-          onClick={() => setShowAddModal(true)}
-          className="relative z-10 px-8 py-4 bg-emerald-600 text-white rounded-2xl font-black uppercase tracking-widest hover:bg-emerald-700 shadow-xl shadow-emerald-500/20 transition-all flex items-center gap-2 group"
-        >
-          <Plus className="w-5 h-5 group-hover:rotate-90 transition-transform" /> Buat Penugasan Baru
-        </button>
+        <div className="flex flex-col sm:flex-row gap-3 relative z-10">
+          <button 
+            onClick={() => setShowAddModal(true)}
+            className="px-8 py-4 bg-emerald-600 text-white rounded-2xl font-black uppercase tracking-widest hover:bg-emerald-700 shadow-xl shadow-emerald-500/20 transition-all flex items-center gap-2 group"
+          >
+            <Plus className="w-5 h-5 group-hover:rotate-90 transition-transform" /> Buat Penugasan Baru
+          </button>
+        </div>
         <div className="absolute top-0 right-0 p-8 text-emerald-50 opacity-10 pointer-events-none">
            <Briefcase className="w-32 h-32" />
         </div>
       </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard title="Total Penugasan" value={jobs.length} icon={ClipboardList} color="blue" />
-        <StatCard title="Petugas Aktif" value={officers.length} icon={Users} color="emerald" />
-        <StatCard title="Menunggu Field" value={jobs.filter(j => j.status === 'PLANNED').length} icon={Clock} color="amber" />
-        <StatCard title="Selesai" value={jobs.filter(j => j.status === 'COMPLETED').length} icon={CheckCircle2} color="slate" />
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <StatCard 
+          title="Total Penugasan" 
+          value={jobs.length} 
+          icon={ClipboardList} 
+          color="blue" 
+          subtitle="Keseleruhan proyek COC"
+        />
+        <StatCard 
+          title="Tugas Aktif Lapangan" 
+          value={jobs.filter(j => j.status === 'IN_FIELD').length} 
+          icon={Briefcase} 
+          color="amber" 
+          subtitle="Sedang dalam pengambilan"
+        />
+        <StatCard 
+          title="Menunggu Review" 
+          value={jobs.filter(j => j.status === 'SUBMITTED').length} 
+          icon={Clock} 
+          color="blue" 
+          subtitle="Data siap divalidasi"
+        />
+        <StatCard 
+          title="Target Tercapai" 
+          value={jobs.filter(j => j.status === 'COMPLETED').length} 
+          icon={CheckCircle2} 
+          color="emerald" 
+          subtitle="Selesai & LHU Terbit"
+        />
+      </div>
+
+      {/* Bottleneck & Attention Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 font-sans">
+        <div className="lg:col-span-2 bg-white p-8 rounded-[32px] border border-slate-200 shadow-sm">
+          <div className="flex items-center justify-between mb-6">
+            <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest flex items-center gap-2">
+              <AlertCircle className="w-5 h-5 text-red-500" /> Perhatian Prioritas
+            </h3>
+            <span className="text-[10px] font-bold text-slate-400 italic">Mendekati Deadline (24j)</span>
+          </div>
+          
+          <div className="space-y-4">
+            {jobs.filter(j => {
+              if (j.status === 'COMPLETED') return false;
+              if (!j.deadlineDate) return false;
+              const deadline = new Date(j.deadlineDate).getTime();
+              const now = new Date().getTime();
+              return (deadline - now) < (24 * 60 * 60 * 1000) && (deadline - now) > 0;
+            }).length > 0 ? (
+              jobs.filter(j => {
+                if (j.status === 'COMPLETED') return false;
+                if (!j.deadlineDate) return false;
+                const deadline = new Date(j.deadlineDate).getTime();
+                const now = new Date().getTime();
+                return (deadline - now) < (24 * 60 * 60 * 1000) && (deadline - now) > 0;
+              }).map(j => (
+                <div key={j.id} className="flex items-center justify-between p-4 bg-red-50 rounded-2xl border border-red-100">
+                  <div className="flex items-center gap-4">
+                    <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-sm text-red-600 font-bold">!</div>
+                    <div>
+                      <p className="text-sm font-black text-slate-900 uppercase">{j.customerName}</p>
+                      <p className="text-[10px] text-red-500 font-bold italic uppercase tracking-tight">STPS: {j.stpsNumber} • Deadline: {j.deadlineDate}</p>
+                    </div>
+                  </div>
+                  <button className="px-4 py-2 bg-red-600 text-white text-[10px] font-black uppercase rounded-lg hover:bg-red-700 transition-colors">
+                    Push Notification
+                  </button>
+                </div>
+              ))
+            ) : (
+              <div className="flex flex-col items-center justify-center py-8 text-center bg-slate-50 border border-dashed border-slate-200 rounded-2xl">
+                 <CheckCircle2 className="w-8 h-8 text-emerald-400 mb-2" />
+                 <p className="text-slate-500 text-sm italic font-medium">Semua tugas berjalan aman dalam jadwal.</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white p-8 rounded-[32px] border border-slate-200 shadow-sm flex flex-col">
+          <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-6 flex items-center gap-2">
+            <Users className="w-5 h-5 text-blue-500" /> Beban Kerja Tim
+          </h3>
+          <div className="space-y-6 overflow-y-auto max-h-[300px] pr-2">
+            {officers.map(off => {
+              const assignedJobs = jobs.filter(j => j.assignedTo === off.uid && j.status !== 'COMPLETED').length;
+              const completedJobs = jobs.filter(j => j.assignedTo === off.uid && j.status === 'COMPLETED').length;
+              const total = assignedJobs + completedJobs;
+              const percentage = total > 0 ? (completedJobs / total) * 100 : 0;
+              
+              return (
+                <div key={off.id}>
+                  <div className="flex justify-between items-end mb-2">
+                    <span className="text-xs font-black text-slate-900 uppercase">{off.displayName || off.email.split('@')[0]}</span>
+                    <span className="text-[10px] font-bold text-slate-500 uppercase italic">
+                      {assignedJobs} Aktif / {completedJobs} Done
+                    </span>
+                  </div>
+                  <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
+                    <motion.div 
+                      initial={{ width: 0 }}
+                      animate={{ width: `${percentage}%` }}
+                      className="h-full bg-emerald-500 rounded-full"
+                    />
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-1 italic uppercase tracking-tighter">
+                    Tingkat Penyelesaian: {Math.round(percentage)}%
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </div>
 
       <div className="bg-white rounded-[32px] border border-slate-200 overflow-hidden shadow-sm">
@@ -577,7 +697,7 @@ const SamplingAdminDashboard: React.FC<SamplingAdminDashboardProps> = ({ user, o
   );
 };
 
-const StatCard = ({ title, value, icon: Icon, color }: any) => {
+const StatCard = ({ title, value, icon: Icon, color, subtitle }: any) => {
   const colors: any = {
     blue: "bg-blue-50 text-blue-600 border-blue-100 shadow-blue-500/5",
     emerald: "bg-emerald-50 text-emerald-600 border-emerald-100 shadow-emerald-500/5",
@@ -589,10 +709,11 @@ const StatCard = ({ title, value, icon: Icon, color }: any) => {
     <div className={cn("p-6 rounded-[24px] border shadow-xl transition-all hover:scale-[1.02]", colors[color])}>
        <div className="flex items-center justify-between mb-4">
           <Icon className="w-6 h-6 opacity-60" />
-          <span className="text-[10px] font-black uppercase tracking-[0.2em]">Live Data</span>
+          <span className="text-[10px] font-black uppercase tracking-[0.2em] opacity-40">Live Data</span>
        </div>
        <p className="text-3xl font-black text-slate-900 leading-none mb-1">{value}</p>
-       <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest italic">{title}</p>
+       <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest italic mb-2">{title}</p>
+       {subtitle && <p className="text-[9px] font-bold text-slate-400/60 uppercase tracking-tighter italic">{subtitle}</p>}
     </div>
   );
 };

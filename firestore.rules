@@ -66,11 +66,16 @@ service cloud.firestore {
 
     function isValidNotification(data) {
       return data.keys().hasAll(['recipientId', 'title', 'message', 'type', 'read']) &&
-             data.recipientId is string &&
+             data.recipientId is string && data.recipientId.size() <= 128 &&
              data.title is string && data.title.size() <= 255 &&
              data.message is string && data.message.size() <= 2000 &&
              data.type in ['info', 'warning', 'error', 'success'] &&
-             data.read is bool;
+             data.read is bool &&
+             (data.keys().size() == 5 || 
+              (data.keys().size() == 6 && (data.keys().hasAny(['category']) || data.keys().hasAny(['createdAt']))) ||
+              (data.keys().size() == 7 && data.keys().hasAll(['category', 'createdAt']))) &&
+             (data.get('category', null) == null || data.category is string) &&
+             (data.get('createdAt', null) == null || data.createdAt is timestamp);
     }
 
     // ===============================================================
@@ -137,11 +142,17 @@ service cloud.firestore {
     }
 
     match /notifications/{notifId} {
-      allow read: if isOwner(existing().recipientId);
+      allow read: if isSignedIn() && (
+        resource.data.recipientId == request.auth.uid || 
+        resource.data.recipientId == 'all' ||
+        resource.data.recipientId == getRole() ||
+        resource.data.recipientId == 'system_' + getRole() ||
+        isAdmin()
+      );
       allow create: if isSignedIn() && isValidNotification(incoming());
-      allow update: if isOwner(existing().recipientId) && 
+      allow update: if (resource.data.recipientId == request.auth.uid || isAdmin()) && 
                       incoming().diff(existing()).affectedKeys().hasOnly(['read', 'updatedAt']);
-      allow delete: if isOwner(existing().recipientId) || isAdmin();
+      allow delete: if resource.data.recipientId == request.auth.uid || isAdmin();
     }
 
     match /stocks/{stockId} {

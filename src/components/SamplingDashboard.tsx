@@ -17,7 +17,11 @@ import {
   Check,
   X,
   FileSignature,
-  QrCode
+  QrCode,
+  Settings,
+  Bell,
+  Save,
+  Briefcase
 } from 'lucide-react';
 import { 
   collection, 
@@ -34,6 +38,7 @@ import { db } from '../firebase';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../lib/utils';
 import { Html5QrcodeScanner } from 'html5-qrcode';
+import { UserContext } from '../App';
 
 interface SamplingDashboardProps {
   user: any;
@@ -41,6 +46,7 @@ interface SamplingDashboardProps {
 }
 
 const SamplingDashboard: React.FC<SamplingDashboardProps> = ({ user, onNotify }) => {
+  const { profile, updateProfile } = React.useContext(UserContext);
   const [jobs, setJobs] = useState<any[]>([]);
   const [selectedJob, setSelectedJob] = useState<any | null>(null);
   const [jobSamples, setJobSamples] = useState<any[]>([]);
@@ -48,6 +54,7 @@ const SamplingDashboard: React.FC<SamplingDashboardProps> = ({ user, onNotify })
   const [showScanner, setShowScanner] = useState(false);
   const [showSignature, setShowSignature] = useState(false);
   const [isSigned, setIsSigned] = useState(false);
+  const [showPreferences, setShowPreferences] = useState(false);
 
   const [fieldData, setFieldData] = useState({
     temperature: '',
@@ -188,6 +195,7 @@ const SamplingDashboard: React.FC<SamplingDashboardProps> = ({ user, onNotify })
         title: 'Sampel Masuk!',
         message: `Tugas sampling dari ${selectedJob.customerName} telah dikirim ke laboratorium.`,
         type: 'info',
+        category: 'status_update',
         read: false,
         createdAt: Timestamp.now()
       });
@@ -215,6 +223,12 @@ const SamplingDashboard: React.FC<SamplingDashboardProps> = ({ user, onNotify })
           <p className="text-slate-500">Kelola dan input data pengambilan sampel di lapangan.</p>
         </div>
         <div className="flex gap-2">
+          <button 
+            onClick={() => setShowPreferences(true)}
+            className="px-4 py-2 bg-white border border-slate-200 text-slate-600 rounded-lg text-sm font-medium hover:bg-slate-50 transition-all flex items-center gap-2"
+          >
+            <Settings className="w-4 h-4" /> Pengaturan
+          </button>
           <div className="px-4 py-2 bg-emerald-50 text-emerald-700 rounded-lg text-sm font-medium border border-emerald-100 flex items-center gap-2">
             <ClipboardCheck className="w-4 h-4" />
             {jobs.filter(j => j.status !== 'COMPLETED').length} Tugas Aktif
@@ -549,6 +563,138 @@ const SamplingDashboard: React.FC<SamplingDashboardProps> = ({ user, onNotify })
           </div>
         )}
       </AnimatePresence>
+
+      <AnimatePresence>
+        {showPreferences && (
+          <PreferencesModal 
+            isOpen={showPreferences} 
+            onClose={() => setShowPreferences(false)}
+            profile={profile}
+            updateProfile={updateProfile}
+          />
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
+const PreferencesModal = ({ isOpen, onClose, profile, updateProfile }: any) => {
+  const [prefs, setStatePrefs] = useState(profile?.notificationPreferences || {
+    newJobAssignment: true,
+    statusUpdate: true
+  });
+  const [loading, setLoading] = useState(false);
+
+  const handleToggle = (key: string) => {
+    setStatePrefs((prev: any) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const handleSave = async () => {
+    setLoading(true);
+    try {
+      await updateProfile({ notificationPreferences: prefs });
+      onClose();
+    } catch (error) {
+      console.error('Failed to update preferences:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        className="bg-white rounded-[32px] p-8 shadow-2xl border border-slate-100 w-full max-w-md"
+      >
+        <div className="flex items-center justify-between mb-8">
+          <div className="flex items-center gap-3">
+            <div className="p-3 bg-blue-50 text-blue-600 rounded-2xl">
+               <Bell className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-xl font-bold text-slate-900 leading-tight">Pengaturan Notifikasi</h3>
+              <p className="text-xs font-medium text-slate-400 uppercase tracking-widest">Atur cara Anda menerima notifikasi</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="space-y-6 mb-8">
+          <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100 hover:border-blue-200 transition-all group">
+            <div className="flex items-center gap-4">
+              <div className="p-2 bg-white rounded-xl shadow-sm text-slate-400 group-hover:text-blue-500 transition-colors">
+                <Briefcase size={20} />
+              </div>
+              <div>
+                <p className="font-bold text-slate-900">Penugasan Tugas Baru</p>
+                <p className="text-xs text-slate-500">Notifikasi saat ada tugas baru</p>
+              </div>
+            </div>
+            <button 
+              onClick={() => handleToggle('newJobAssignment')}
+              className={cn(
+                "w-12 h-6 rounded-full transition-all relative",
+                prefs.newJobAssignment ? "bg-blue-600" : "bg-slate-300"
+              )}
+            >
+              <div className={cn(
+                "w-4 h-4 bg-white rounded-full absolute top-1 transition-all shadow-sm",
+                prefs.newJobAssignment ? "right-1" : "left-1"
+              )} />
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100 hover:border-blue-200 transition-all group">
+            <div className="flex items-center gap-4">
+              <div className="p-2 bg-white rounded-xl shadow-sm text-slate-400 group-hover:text-blue-500 transition-colors">
+                <Clock size={20} />
+              </div>
+              <div>
+                <p className="font-bold text-slate-900">Pembaruan Status</p>
+                <p className="text-xs text-slate-500">Perubahan status sampling & lab</p>
+              </div>
+            </div>
+            <button 
+              onClick={() => handleToggle('statusUpdate')}
+              className={cn(
+                "w-12 h-6 rounded-full transition-all relative",
+                prefs.statusUpdate ? "bg-blue-600" : "bg-slate-300"
+              )}
+            >
+              <div className={cn(
+                "w-4 h-4 bg-white rounded-full absolute top-1 transition-all shadow-sm",
+                prefs.statusUpdate ? "right-1" : "left-1"
+              )} />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <button 
+            onClick={handleSave}
+            disabled={loading}
+            className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black uppercase tracking-widest hover:bg-slate-800 transition-all flex items-center justify-center gap-2"
+          >
+            {loading ? 'Simpan...' : (
+              <>
+                <Save className="w-4 h-4" /> Simpan Perubahan
+              </>
+            )}
+          </button>
+          <button 
+            onClick={onClose}
+            className="w-full py-4 bg-white text-slate-500 rounded-2xl font-bold hover:bg-slate-50 transition-all"
+          >
+            Batal
+          </button>
+        </div>
+      </motion.div>
     </div>
   );
 };

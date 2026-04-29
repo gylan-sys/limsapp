@@ -202,6 +202,7 @@ const LabLoginDashboard: React.FC<LabLoginDashboardProps> = ({ user, onNotify })
         title: 'Sampel Masuk Chiller',
         message: `Sampel ${jobSamples.find(s => s.id === sampleId)?.sampleName} telah masuk di Chiller ${data.chiller} (Lab ${data.labType.toUpperCase()})`,
         type: 'info',
+        category: 'status_update',
         read: false,
         createdAt: Timestamp.now()
       });
@@ -237,6 +238,7 @@ const LabLoginDashboard: React.FC<LabLoginDashboardProps> = ({ user, onNotify })
         title: 'Sampel Baru Tersedia',
         message: `Sampel dari ${selectedJob.customerName} telah diverifikasi dan siap dianalisis.`,
         type: 'success',
+        category: 'status_update',
         read: false,
         createdAt: Timestamp.now()
       });

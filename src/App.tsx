@@ -81,7 +81,7 @@ import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User,
 import { initializeApp, deleteApp, getApps } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import firebaseConfig from '../firebase-applet-config.json';
-import { doc, getDoc, setDoc, collection, onSnapshot, query, where, addDoc, updateDoc, deleteDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, onSnapshot, query, where, addDoc, updateDoc, deleteDoc, serverTimestamp, Timestamp, orderBy, limit } from 'firebase/firestore';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from './lib/utils';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, Legend } from 'recharts';
@@ -166,6 +166,10 @@ interface UserProfile {
   displayName: string;
   role: UserRole;
   permissions?: string[];
+  notificationPreferences?: {
+    newJobAssignment: boolean;
+    statusUpdate: boolean;
+  };
   createdAt: any;
 }
 
@@ -276,6 +280,7 @@ interface AppNotification {
   timestamp: Date;
   read: boolean;
   link?: string;
+  category?: string;
 }
 
 // --- QR Code Components ---
@@ -1294,9 +1299,10 @@ const PhotoCaptureModal = ({ onClose, onCapture }: { onClose: () => void; onCapt
   );
 };
 
-const UserContext = React.createContext<{ 
+export const UserContext = React.createContext<{ 
   user: User | null; 
   profile: UserProfile | null;
+  updateProfile: (updates: Partial<UserProfile>) => Promise<void>;
   expiryThreshold: number;
   setExpiryThreshold: (val: number) => void;
   settings: AppSettingsData;
@@ -1307,6 +1313,7 @@ const UserContext = React.createContext<{
 }>({ 
   user: null, 
   profile: null, 
+  updateProfile: async () => {},
   expiryThreshold: 30, 
   setExpiryThreshold: () => {},
   settings: DEFAULT_SETTINGS,
@@ -1392,8 +1399,72 @@ const AuthGuard = ({ children }: { children: React.ReactNode }) => {
     }
   }, [user]);
 
-  const markNotificationAsRead = (id: string) => {
+  useEffect(() => {
+    if (!user || !profile) return;
+
+    const recipientIds = [user.uid, 'all'];
+    if (profile.role) {
+      recipientIds.push(profile.role);
+      recipientIds.push(`system_${profile.role}`);
+    }
+
+    const q = query(
+      collection(db, 'notifications'),
+      where('recipientId', 'in', recipientIds),
+      orderBy('createdAt', 'desc'),
+      limit(20)
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const dbNotifs = snapshot.docs.map(d => {
+        const data = d.data();
+        
+        // Filter based on preferences if category is present
+        if (data.category === 'new_job' && profile?.notificationPreferences?.newJobAssignment === false) {
+          return null;
+        }
+        if (data.category === 'status_update' && profile?.notificationPreferences?.statusUpdate === false) {
+          return null;
+        }
+
+        return {
+          id: d.id,
+          title: data.title,
+          message: data.message,
+          type: data.type || 'info',
+          category: data.category,
+          timestamp: data.createdAt?.toDate() || new Date(),
+          read: data.read || false,
+          link: data.link
+        };
+      }).filter(n => n !== null) as AppNotification[];
+      
+      setNotifications(prev => {
+        // Keep local-only notifications (those not in DB)
+        const localOnly = prev.filter(p => !dbNotifs.find(d => d.id === p.id));
+        return [...dbNotifs, ...localOnly].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+      });
+    }, (error) => {
+      console.error('Notification listener error:', error);
+    });
+
+    return () => unsubscribe();
+  }, [user, profile]);
+
+  const markNotificationAsRead = async (id: string) => {
+    // Update local state
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+    
+    // Update Firestore if it exists there
+    try {
+      const notifRef = doc(db, 'notifications', id);
+      const notifDoc = await getDoc(notifRef);
+      if (notifDoc.exists()) {
+        await updateDoc(notifRef, { read: true });
+      }
+    } catch (e) {
+      console.error('Error marking notification as read in Firestore:', e);
+    }
   };
 
   const addNotification = (title: string, message: string, type: 'info' | 'warning' | 'error' | 'success' = 'info') => {
@@ -1405,6 +1476,36 @@ const AuthGuard = ({ children }: { children: React.ReactNode }) => {
       timestamp: new Date(),
       read: false
     }, ...prev]);
+  };
+
+  const updateProfile = async (updates: Partial<UserProfile>) => {
+    if (!user || !profile) return;
+    try {
+      // Sync to SQL via API
+      if (updates.notificationPreferences) {
+        const res = await fetch(`/api/users/${user.uid}/preferences`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            preferences: updates.notificationPreferences,
+            requesterUid: user.uid
+          })
+        });
+        if (!res.ok) throw new Error('Failed to update preferences on server');
+      }
+
+      // Sync to Firestore for real-time checks
+      await setDoc(doc(db, 'users', user.uid), {
+        ...updates,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+
+      // Update local state
+      setProfile(prev => prev ? { ...prev, ...updates } : null);
+    } catch (error) {
+      console.error('Error updating profile:', error);
+      throw error;
+    }
   };
 
   useEffect(() => {
@@ -1464,6 +1565,7 @@ const AuthGuard = ({ children }: { children: React.ReactNode }) => {
     <UserContext.Provider value={{ 
       user, 
       profile, 
+      updateProfile,
       expiryThreshold, 
       setExpiryThreshold, 
       settings, 
@@ -1586,36 +1688,8 @@ const Login = () => {
             backgroundPosition: 'center'
           }}
         >
-          <div className="absolute inset-0 bg-gradient-to-br from-emerald-900/80 via-slate-900/60 to-slate-900/90 backdrop-blur-[2px]"></div>
+          <div className="absolute inset-0 bg-gradient-to-br from-slate-900/60 via-slate-900/40 to-slate-900/80 backdrop-blur-[1px]"></div>
         </motion.div>
-
-        {/* Floating Elements */}
-        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-          {[...Array(6)].map((_, i) => (
-            <motion.div
-              key={i}
-              initial={{ opacity: 0, scale: 0 }}
-              animate={{ 
-                opacity: [0.1, 0.3, 0.1], 
-                scale: [1, 1.2, 1],
-                x: [0, Math.random() * 50 - 25, 0],
-                y: [0, Math.random() * 50 - 25, 0]
-              }}
-              transition={{ 
-                duration: 10 + Math.random() * 10, 
-                repeat: Infinity,
-                delay: i * 2
-              }}
-              className="absolute rounded-full bg-emerald-400/20 blur-3xl"
-              style={{
-                width: `${200 + Math.random() * 300}px`,
-                height: `${200 + Math.random() * 300}px`,
-                left: `${Math.random() * 100}%`,
-                top: `${Math.random() * 100}%`,
-              }}
-            />
-          ))}
-        </div>
 
         <div className="relative z-10 flex flex-col justify-between p-16 w-full">
           <motion.div
